@@ -1,0 +1,13 @@
+[package]
+name = "KanshiUI"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+dirs = "5"
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"
+regex = "1"
+swayipc = "3"
+tempfile = "3"
