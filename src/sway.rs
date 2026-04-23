@@ -49,6 +49,8 @@ pub fn default_screen_from_runtime(output: &RuntimeOutput, index: usize) -> Opti
         scale: 1.0,
         pos_x: (index as i32) * mode.width as i32,
         pos_y: 0,
+        mirror: false,
+        mirror_target: None,
     })
 }
 

@@ -54,6 +54,12 @@ pub struct ScreenConfig {
     pub scale: f64,
     pub pos_x: i32,
     pub pos_y: i32,
+    // Mirroring: when true this screen mirrors another target specified by
+    // `mirror_target` (the target's screen id). When mirroring, the screen
+    // should not be shown on the canvas and is positioned/scaled to fit the
+    // target on save.
+    pub mirror: bool,
+    pub mirror_target: Option<String>,
 }
 
 #[derive(Clone, Debug)]

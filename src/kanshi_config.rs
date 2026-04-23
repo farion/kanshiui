@@ -111,9 +111,78 @@ pub fn generate_profile(profile: &Profile) -> String {
         "profile \"{}\"{{\n",
         escape_double_quotes(&profile.name)
     ));
+    // Build a lookup of screens by id to resolve mirror targets without
+    // re-borrowing the profile during iteration.
+    let mut by_id: HashMap<&str, &ScreenConfig> = HashMap::new();
+    for s in &profile.screens {
+        by_id.insert(s.id.as_str(), s);
+    }
+
     for screen in &profile.screens {
         let id = format_output_id(&screen.id);
         let state = if screen.enabled { "enable" } else { "disable" };
+
+        // If this screen is mirroring another and a valid target is set,
+        // compute a scale and position so the mirrored content fits centered
+        // inside the target's visible area while preserving aspect ratio.
+        if screen.mirror {
+            if let Some(ref target_id) = screen.mirror_target {
+                if let Some(target) = by_id.get(target_id.as_str()) {
+                    // Physical sizes (pixels)
+                    let t_w = target.selected_mode.width as f64;
+                    let t_h = target.selected_mode.height as f64;
+                    let s_w = screen.selected_mode.width as f64;
+                    let s_h = screen.selected_mode.height as f64;
+
+                    // Target virtual sizes = physical / target.scale
+                    let t_scale = if target.scale == 0.0 {
+                        1.0
+                    } else {
+                        target.scale
+                    };
+                    let t_vw = t_w / t_scale;
+                    let t_vh = t_h / t_scale;
+
+                    // Choose mirror scale so the mirror's virtual size fits
+                    // inside the target virtual size: s_w / m <= t_vw -> m >= s_w / t_vw
+                    let scale_w = s_w / t_vw;
+                    let scale_h = s_h / t_vh;
+                    let mirror_scale = scale_w.max(scale_h).max(0.0001);
+
+                    // The mirror's virtual size will be s_w / mirror_scale. To
+                    // convert that into physical pixels inside the target's
+                    // compositor space, multiply by the target's scale.
+                    let mirror_physical_w = (s_w / mirror_scale) * t_scale;
+                    let mirror_physical_h = (s_h / mirror_scale) * t_scale;
+
+                    // Center the mirrored content inside the target in physical
+                    // compositor pixels.
+                    let target_center_x = target.pos_x as f64 + t_w / 2.0;
+                    let target_center_y = target.pos_y as f64 + t_h / 2.0;
+                    let mirror_pos_x = (target_center_x - mirror_physical_w / 2.0).round() as i32;
+                    let mirror_pos_y = (target_center_y - mirror_physical_h / 2.0).round() as i32;
+
+                    // Emit a kanshiui comment so the editor can recover mirror
+                    // metadata later. This is ignored by kanshi but parsed by
+                    // the UI when loading profiles.
+                    out.push_str(&format!(
+                        "  # kanshiui: mirror id='{}' target='{}'\n",
+                        screen.id.replace('"', "'"),
+                        target_id.replace('"', "'"),
+                    ));
+                    out.push_str(&format!(
+                        "  output {id} {state} mode {} position {},{} scale {}\n",
+                        screen.selected_mode.as_kanshi_mode(),
+                        mirror_pos_x,
+                        mirror_pos_y,
+                        trim_float(mirror_scale),
+                    ));
+                    continue;
+                }
+            }
+        }
+
+        // Fallback: write the stored position/scale
         out.push_str(&format!(
             "  output {id} {state} mode {} position {},{} scale {}\n",
             screen.selected_mode.as_kanshi_mode(),
@@ -145,6 +214,22 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
 
     let mut screens = Vec::new();
 
+    // Parse kanshiui-specific comments that persist UI-only metadata such as
+    // mirror settings. Comment format:
+    //   # kanshiui: mirror id='SCREEN_ID' target='TARGET_ID'
+    let mirror_re =
+        Regex::new(r#"^\s*#\s*kanshiui:\s*mirror\s+id='([^']+)'\s+target='([^']+)'\s*$"#)?;
+    let mut mirror_map: HashMap<String, String> = HashMap::new();
+    for line in body.lines() {
+        if let Some(caps) = mirror_re.captures(line) {
+            let id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let target = caps.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+            if !id.is_empty() && !target.is_empty() {
+                mirror_map.insert(id, target);
+            }
+        }
+    }
+
     let lines: Vec<&str> = body.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -154,7 +239,13 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
             continue;
         }
         if let Some(caps) = inline_re.captures(line) {
-            if let Some(screen) = caps_to_screen(&caps, aliases) {
+            if let Some(mut screen) = caps_to_screen(&caps, aliases) {
+                // Apply kanshiui mirror metadata when present for inline
+                // output lines as well.
+                if let Some(t) = mirror_map.get(&screen.id) {
+                    screen.mirror = true;
+                    screen.mirror_target = Some(t.clone());
+                }
                 screens.push(screen);
             }
             i += 1;
@@ -210,6 +301,12 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
                 }
                 i += 1;
             }
+            let mut mirror = false;
+            let mut mirror_target = None;
+            if let Some(t) = mirror_map.get(&output_id) {
+                mirror = true;
+                mirror_target = Some(t.clone());
+            }
             screens.push(ScreenConfig {
                 id: output_id.clone(),
                 connector_name: output_id,
@@ -219,6 +316,8 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
                 scale,
                 pos_x,
                 pos_y,
+                mirror,
+                mirror_target,
             });
         }
         i += 1;
@@ -272,6 +371,8 @@ fn caps_to_screen(
         scale,
         pos_x: x,
         pos_y: y,
+        mirror: false,
+        mirror_target: None,
     })
 }
 
@@ -505,6 +606,8 @@ profile "Office"{
                 scale: 1.0,
                 pos_x: 0,
                 pos_y: 0,
+                mirror: false,
+                mirror_target: None,
             }],
             raw_range: None,
         };

@@ -106,6 +106,22 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                 let gap = 6.0f32;
                 ui.add_space(6.0);
                 let last = profile.screens.len().saturating_sub(1);
+
+                // Precompute candidate mirror target lists for each screen to
+                // avoid immutable borrows of profile.screens while we iterate
+                // mutably. Each entry is a Vec<String> of ids that are enabled
+                // and not mirroring (excluding the screen itself).
+                let mut candidate_lists: Vec<Vec<String>> = Vec::new();
+                for s in &profile.screens {
+                    let list = profile
+                        .screens
+                        .iter()
+                        .filter(|o| o.enabled && !o.mirror && o.id != s.id)
+                        .map(|o| o.id.clone())
+                        .collect::<Vec<_>>();
+                    candidate_lists.push(list);
+                }
+
                 for (idx, screen) in profile.screens.iter_mut().enumerate() {
                     // Inner left padding
                     ui.add_space(8.0);
@@ -127,6 +143,38 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                             ui.label("Position");
                             ui.add(egui::DragValue::new(&mut screen.pos_x));
                             ui.add(egui::DragValue::new(&mut screen.pos_y));
+                        });
+
+                        // Mirroring controls
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut screen.mirror, "Mirror");
+                            if screen.mirror {
+                                // Use the precomputed candidate list for this index
+                                let candidates = &candidate_lists[idx];
+                                // Ensure the current target is present; if not, clear it
+                                if let Some(ref t) = screen.mirror_target {
+                                    if !candidates.contains(t) {
+                                        screen.mirror_target = None;
+                                    }
+                                }
+                                let selected_text =
+                                    screen.mirror_target.as_deref().unwrap_or("None");
+                                egui::ComboBox::from_id_salt(format!(
+                                    "mirror-target-{}",
+                                    screen.id
+                                ))
+                                .selected_text(selected_text)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut screen.mirror_target, None, "None");
+                                    for cand in candidates.iter() {
+                                        ui.selectable_value(
+                                            &mut screen.mirror_target,
+                                            Some(cand.clone()),
+                                            cand.clone(),
+                                        );
+                                    }
+                                });
+                            }
                         });
 
                         egui::ComboBox::from_id_salt(format!("mode-side-{}", screen.id))
@@ -449,17 +497,21 @@ fn render_canvas(app: &mut KanshiApp, ui: &mut egui::Ui, editable: bool) {
         StrokeKind::Inside,
     );
 
-    // Precompute UI rects for all screens so we can snap without simultaneous
-    // mutable and immutable borrows of profile.screens.
-    let mut rects: Vec<Rect> = profile
-        .screens
-        .iter()
-        .map(|s| screen_rect_from_config(s, canvas_rect))
+    // Build a list of visible (non-mirroring) screen indices and precompute
+    // UI rects only for those. Mirrored screens are not shown on the canvas.
+    let visible_indices: Vec<usize> = (0..profile.screens.len())
+        .filter(|&i| !profile.screens[i].mirror)
         .collect();
 
-    for i in 0..profile.screens.len() {
+    let mut rects: Vec<Rect> = visible_indices
+        .iter()
+        .map(|&i| screen_rect_from_config(&profile.screens[i], canvas_rect))
+        .collect();
+
+    for vis_idx in 0..visible_indices.len() {
+        let i = visible_indices[vis_idx];
         // Use the precomputed rect for UI interaction.
-        let mut screen_rect = rects[i];
+        let mut screen_rect = rects[vis_idx];
         let response = ui.allocate_rect(screen_rect, Sense::click_and_drag());
 
         if editable && response.dragged() {
@@ -495,7 +547,7 @@ fn render_canvas(app: &mut KanshiApp, ui: &mut egui::Ui, editable: bool) {
             // virtual sizes mapped to UI.
             let mut others_ui: Vec<Rect> = Vec::new();
             for (j, r) in rects.iter().enumerate() {
-                if i == j {
+                if j == vis_idx {
                     continue;
                 }
                 others_ui.push(*r);
@@ -534,7 +586,7 @@ fn render_canvas(app: &mut KanshiApp, ui: &mut egui::Ui, editable: bool) {
 
             // Recompute the UI rect for drawing after the update
             screen_rect = screen_rect_from_config(screen, canvas_rect);
-            rects[i] = screen_rect;
+            rects[vis_idx] = screen_rect;
 
             // If dragging ended, clear the anchor
             if response.drag_stopped() {

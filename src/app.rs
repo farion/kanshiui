@@ -169,7 +169,22 @@ impl KanshiApp {
                     }
                 }
 
-                self.refresh_all();
+                // Update in-memory profiles to reflect the saved profile so
+                // UI-only metadata (like mirroring) is preserved until the
+                // user or external event forces a full reload. Avoid a full
+                // refresh here because parsing the file currently does not
+                // retain UI-only fields and would wipe them.
+                if let Some(pos) = self
+                    .state
+                    .profiles
+                    .iter()
+                    .position(|p| p.name == profile.name)
+                {
+                    self.state.profiles[pos] = profile.clone();
+                } else {
+                    self.state.profiles.push(profile.clone());
+                }
+                self.state.current_profile = Some(profile);
             }
             Err(err) => {
                 self.state.status = format!("Save failed: {err}");
