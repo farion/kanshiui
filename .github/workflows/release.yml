@@ -5,6 +5,9 @@ on:
     tags:
       - "*"
 
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     name: Build Linux and package
@@ -92,11 +95,77 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          # copy everything into release-assets
-          find dist -type f -maxdepth 2 -print0 | xargs -0 -I{} cp -v {} release-assets/
+          # Copy all files from dist (recursively) into release-assets root.
+          # Avoid using -maxdepth so we don't miss files nested deeper.
+          find dist -type f -print0 | xargs -0 -I{} cp -v {} release-assets/ || true
+          echo "Contents of release-assets:"
+          ls -la release-assets || true
 
-      - name: Create GitHub Release and upload assets
-        uses: ncipollo/release-action@v1
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
         with:
-          tag: ${{ github.ref_name }}
-          files: release-assets/**
+          tag_name: ${{ github.ref_name }}
+          release_name: ${{ github.ref_name }}
+          body: |
+            Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release assets
+        run: |
+          set -eux
+          # The upload_url output may contain a template like '{?name,label}' - strip it
+          upload_url="${{ steps.create_release.outputs.upload_url }}"
+          upload_url="${upload_url%\{*}"
+
+          echo "Contents of dist:"
+          ls -la dist || true
+          echo "Contents of release-assets:"
+          ls -la release-assets || true
+
+          failed=0
+          for src in dist release-assets; do
+            if [ -d "$src" ]; then
+              for f in "$src"/*; do
+                [ -f "$f" ] || continue
+                fname=$(basename "$f")
+                echo "Uploading $fname from $src"
+                tries=0
+                until [ "$tries" -ge 3 ]; do
+                  tries=$((tries+1))
+                  echo "Attempt #$tries to upload $fname"
+                  # Use Bearer auth and GitHub recommended Accept header
+                  http_response=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
+                    -H "Authorization: Bearer $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    -H "Content-Type: application/octet-stream" \
+                    --data-binary @"$f" \
+                    "$upload_url?name=$fname")
+                  body=$(cat /tmp/resp || true)
+                  if [ "$http_response" -ge 200 ] && [ "$http_response" -lt 300 ]; then
+                    echo "Uploaded $fname (status $http_response)"
+                    break
+                  else
+                    echo "Upload failed (status $http_response). Response: $body"
+                    if [ "$tries" -lt 3 ]; then
+                      sleep $((tries * 2))
+                      continue
+                    else
+                      failed=1
+                      break
+                    fi
+                  fi
+                done
+              done
+            fi
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more uploads failed"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
