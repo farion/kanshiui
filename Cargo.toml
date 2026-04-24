@@ -3,6 +3,11 @@ name = "KanshiUI"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
+description = "A small UI for kanshi"
+authors = ["Frieder Reinhold <reinhold@trigon-media.com>"]
+
+[package.metadata.deb]
+copyright = "© Frieder Reinhold"
 
 [dependencies]
 anyhow = "1"

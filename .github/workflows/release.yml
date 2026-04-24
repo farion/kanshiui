@@ -36,7 +36,8 @@ jobs:
 
           # deb (cargo-deb)
           cargo install cargo-deb --locked || true
-          cargo deb --no-build || true
+          # Use the Git tag version (strip leading 'v') for the .deb package
+          cargo deb --no-build --deb-version ${VERSION#v} || true
           if ls target/debian/*.deb 1> /dev/null 2>&1; then cp target/debian/*.deb dist/; fi
 
           # rpm via fpm
@@ -51,7 +52,7 @@ jobs:
           # Arch tarball with PKGBUILD (so users can build with makepkg)
           mkdir -p pkgbuild
           cp target/release/$BINARY pkgbuild/kanshiui
-          cat > pkgbuild/PKGBUILD <<EOF
+          cat > pkgbuild/PKGBUILD <<'EOF'
           pkgname=kanshiui
           pkgver=${VERSION#v}
           pkgrel=1
@@ -62,9 +63,8 @@ jobs:
           source=('kanshiui')
           sha256sums=('SKIP')
           package() {
-            # Keep $srcdir and $pkgdir as literal variables in the PKGBUILD
-            # (they are evaluated by makepkg, not by this workflow shell).
-            install -Dm755 "\$srcdir/kanshiui" "\$pkgdir/usr/bin/kanshiui"
+            # $srcdir and $pkgdir are evaluated by makepkg, not by this workflow shell.
+            install -Dm755 "$srcdir/kanshiui" "$pkgdir/usr/bin/kanshiui"
           }
           EOF
           tar -C pkgbuild -cJf dist/kanshiui-${VERSION}-arch.tar.xz .
