@@ -115,6 +115,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -eux
           # The upload_url output may contain a template like '{?name,label}' - strip it
@@ -126,46 +130,87 @@ jobs:
           echo "Contents of release-assets:"
           ls -la release-assets || true
 
-          failed=0
+          # Query the release to find existing assets and avoid duplicate uploads
+          echo "Querying release for tag $TAG"
+          release_json=$(curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO/releases/tags/$TAG")
+          echo "$release_json" > /tmp/release.json || true
+          release_id=$(echo "$release_json" | python3 -c 'import sys,json; j=json.load(sys.stdin); print(j.get("id",""))')
+          echo "Release id: $release_id"
+
+          existing_assets=$(echo "$release_json" | python3 -c 'import sys,json; j=json.load(sys.stdin); print("\n".join(a["name"]+"\t"+str(a["id"]) for a in j.get("assets",[])))') || true
+          echo "Existing assets:\n$existing_assets" || true
+
+          # Build a unique upload directory to avoid duplicating names from multiple source dirs
+          upload_dir=release-upload
+          rm -rf "$upload_dir"
+          mkdir -p "$upload_dir"
           for src in dist release-assets; do
             if [ -d "$src" ]; then
               for f in "$src"/*; do
                 [ -f "$f" ] || continue
-                fname=$(basename "$f")
-                echo "Uploading $fname from $src"
-                tries=0
-                until [ "$tries" -ge 3 ]; do
-                  tries=$((tries+1))
-                  echo "Attempt #$tries to upload $fname"
-                  # Use Bearer auth and GitHub recommended Accept header
-                  http_response=$(curl -sS -o /tmp/resp -w "%{http_code}" -X POST \
-                    -H "Authorization: Bearer $GITHUB_TOKEN" \
-                    -H "Accept: application/vnd.github+json" \
-                    -H "Content-Type: application/octet-stream" \
-                    --data-binary @"$f" \
-                    "$upload_url?name=$fname")
-                  body=$(cat /tmp/resp || true)
-                  if [ "$http_response" -ge 200 ] && [ "$http_response" -lt 300 ]; then
-                    echo "Uploaded $fname (status $http_response)"
-                    break
-                  else
-                    echo "Upload failed (status $http_response). Response: $body"
-                    if [ "$tries" -lt 3 ]; then
-                      sleep $((tries * 2))
-                      continue
-                    else
-                      failed=1
-                      break
-                    fi
-                  fi
-                done
+                # Copy without clobber so duplicates are ignored
+                cp -n "$f" "$upload_dir/" || true
               done
             fi
+          done
+
+          echo "Files to upload:" && ls -la "$upload_dir" || true
+
+          failed=0
+          for f in "$upload_dir"/*; do
+            [ -f "$f" ] || continue
+            name=$(basename "$f")
+
+            # Skip if release already contains an asset with the same name
+            if printf '%s
+' '| sed -n '1,${p;}' >/dev/null 2>&1; then
+              :
+            fi
+            if printf '%s
+              echo "Skipping $name (already exists in release)"
+              continue
+            fi
+
+            tries=0
+            until [ "$tries" -ge 3 ]; do
+              tries=$((tries+1))
+              echo "Attempt #$tries to upload $name"
+              http_response=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/octet-stream" --data-binary @"$f" "$upload_url?name=$name")
+              body=$(cat /tmp/resp || true)
+              if [ "$http_response" -ge 200 ] && [ "$http_response" -lt 300 ]; then
+                echo "Uploaded $name (status $http_response)"
+                break
+              fi
+
+              # When an asset with the same name already exists, GitHub returns 422 with code already_exists.
+              # Treat that as a successful skip instead of a hard failure.
+              if [ "$http_response" -eq 422 ]; then
+                if echo "$body" | grep -q '"code":"already_exists"'; then
+                  echo "Asset $name already exists in release; skipping"
+                  break
+                fi
+                echo "Upload returned 422 but did not report already_exists. Response: $body"
+                if [ "$tries" -lt 3 ]; then
+                  sleep $((tries * 2))
+                  continue
+                else
+                  failed=1
+                  break
+                fi
+              fi
+
+              echo "Upload failed (status $http_response). Response: $body"
+              if [ "$tries" -lt 3 ]; then
+                sleep $((tries * 2))
+                continue
+              else
+                failed=1
+                break
+              fi
+            done
           done
 
           if [ "$failed" -ne 0 ]; then
             echo "One or more uploads failed"
             exit 1
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
