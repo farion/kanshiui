@@ -160,10 +160,23 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                             // Inner left padding
                             ui.add_space(8.0);
 
+                            // Create a short stable UID for this screen derived from
+                            // both its friendly id and connector so UI element IDs
+                            // remain unique even when multiple screens share the
+                            // same friendly name.
+                            let id_clone = screen.id.clone();
+                            let conn_clone = screen.connector_name.clone();
+                            let uid = {
+                                let mut hasher = DefaultHasher::new();
+                                id_clone.hash(&mut hasher);
+                                conn_clone.hash(&mut hasher);
+                                format!("{:x}", hasher.finish())
+                            };
+
                             ui.add_enabled_ui(!app.state.current_profile_read_only, |ui| {
                                 ui.horizontal(|ui| {
                                     // Left color bar spanning the whole card height
-                                    let left_color = color_for_id(&screen.id);
+                                    let left_color = color_for_id(&format!("{}||{}", screen.id, screen.connector_name));
                                     let (bar_rect, _resp) = ui.allocate_exact_size(
                                         Vec2::new(8.0, box_height),
                                         Sense::hover(),
@@ -179,15 +192,23 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                                         // If the connector stored in the screen struct isn't
                                         // the canonical connector, try to resolve it from
                                         // the runtime_connectors map.
-                                        let conn = runtime_connectors
-                                            .get(&screen.id)
-                                            .cloned()
-                                            .unwrap_or_else(|| screen.connector_name.clone());
+                                        // Prefer the connector stored in the ScreenConfig
+                                        // when present; fall back to the runtime map
+                                        // when the ScreenConfig only contains a
+                                        // friendly id.
+                                        let conn = if screen.connector_name != screen.id {
+                                            screen.connector_name.clone()
+                                        } else {
+                                            runtime_connectors
+                                                .get(&screen.id)
+                                                .cloned()
+                                                .unwrap_or_else(|| screen.connector_name.clone())
+                                        };
                                         ui.colored_label(
                                             Color32::WHITE,
                                             format!("{} ({})", screen.id, conn),
                                         );
-                                        egui::Grid::new(format!("grid-{}", screen.id))
+                                        egui::Grid::new(format!("grid-{}", uid))
                                             .num_columns(2)
                                             .spacing([8.0, 6.0])
                                             .striped(false)
@@ -213,23 +234,20 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                                                 ui.add_enabled_ui(screen.enabled, |ui| {
                                                     egui::ComboBox::from_id_salt(format!(
                                                         "mode-side-{}",
-                                                        screen.id
+                                                        uid
                                                     ))
                                                     .selected_text(
                                                         screen.selected_mode.as_kanshi_mode(),
                                                     )
                                                     .show_ui(ui, |ui| {
+                                                        // Prefer runtime modes keyed by connector
+                                                        // name (more precise), fall back to the
+                                                        // friendly id when necessary.
                                                         let modes = runtime_modes
-                                                            .get(&screen.id)
+                                                            .get(&screen.connector_name)
                                                             .cloned()
-                                                            .or_else(|| {
-                                                                runtime_modes
-                                                                    .get(&screen.connector_name)
-                                                                    .cloned()
-                                                            })
-                                                            .unwrap_or_else(|| {
-                                                                screen.available_modes.clone()
-                                                            });
+                                                            .or_else(|| runtime_modes.get(&screen.id).cloned())
+                                                            .unwrap_or_else(|| screen.available_modes.clone());
                                                         for mode in modes {
                                                             let selected =
                                                                 mode == screen.selected_mode;
@@ -268,7 +286,7 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                                                     .unwrap_or("None");
                                                 egui::ComboBox::from_id_salt(format!(
                                                     "mirror-target-{}",
-                                                    screen.id
+                                                    uid
                                                 ))
                                                 .selected_text(selected_text)
                                                 .show_ui(ui, |ui| {
@@ -278,6 +296,9 @@ pub fn render_main_ui(app: &mut KanshiApp, ctx: &egui::Context) {
                                                         "None",
                                                     );
                                                     for cand in candidates.iter() {
+                                                        // Ensure the candidate label shows the
+                                                        // friendly id but mirror_target stores
+                                                        // the friendly id, so this remains stable.
                                                         ui.selectable_value(
                                                             &mut screen.mirror_target,
                                                             Some(cand.clone()),
@@ -591,7 +612,7 @@ fn render_canvas(app: &mut KanshiApp, ui: &mut egui::Ui, editable: bool) {
         // fallback to gray when disabled so the user can tell disabled
         // screens apart. Keep text white for contrast.
         let fill = if screen.enabled {
-            let mut c = color_for_id(&screen.id);
+            let mut c = color_for_id(&format!("{}||{}", screen.id, screen.connector_name));
             // make slightly darker / semi-opaque for canvas readability
             c = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 230);
             c

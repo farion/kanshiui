@@ -25,7 +25,9 @@ impl eframe::App for IdentifyOverlayApp {
             .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
                 let rect = ui.max_rect();
-                let bg = color_for_id(&self.payload.display_name);
+                // Color should be stable per display identifier + connector so
+                // identical models on different connectors get distinct colors.
+                let bg = color_for_id(&format!("{}||{}", self.payload.display_name, self.payload.connector));
                 let bg = Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), 220);
                 // Use square corners for the overlay window background.
                 ui.painter().rect_filled(rect, 0.0, bg);

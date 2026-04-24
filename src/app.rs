@@ -256,16 +256,42 @@ impl KanshiApp {
     }
 
     pub fn profile_matches_current_hardware(&self, profile: &Profile) -> bool {
+        // Build three multisets for comparison: canonical display ids,
+        // connector names, and the composite of canonical id + connector.
         let mut output_ids = HashMap::<String, usize>::new();
         let mut output_conn = HashMap::<String, usize>::new();
+        let mut output_combined = HashMap::<String, usize>::new();
         for output in &self.state.connected_outputs {
             *output_ids.entry(output.display_id()).or_insert(0) += 1;
             *output_conn
                 .entry(output.connector_name.clone())
                 .or_insert(0) += 1;
+            let key = format!("{}||{}", output.display_id(), output.connector_name);
+            *output_combined.entry(key).or_insert(0) += 1;
         }
 
+        // Build profile multisets: legacy id-only and composite id+connector
         let profile_set = screen_multiset(&profile.screens);
+        let mut profile_combined = HashMap::<String, usize>::new();
+        for s in &profile.screens {
+            let key = format!("{}||{}", s.id, s.connector_name);
+            *profile_combined.entry(key).or_insert(0) += 1;
+        }
+
+        // Prefer exact composite match when available for unambiguous
+        // identification. If the runtime outputs contain duplicate canonical
+        // ids (ambiguous devices), do NOT fall back to legacy id-only
+        // matching — require an exact composite match so we don't hide
+        // duplicate connectors behind a profile that doesn't reference
+        // connectors explicitly.
+        if profile_combined == output_combined {
+            return true;
+        }
+        let has_dup = output_ids.values().any(|&v| v > 1);
+        if has_dup {
+            return false;
+        }
+        // No duplicates: allow legacy fallback matches for compatibility.
         profile_set == output_ids || profile_set == output_conn
     }
 

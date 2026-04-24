@@ -11,9 +11,6 @@ pub fn rescan_outputs() -> Result<Vec<RuntimeOutput>> {
 
     let mut result = Vec::new();
     for output in outputs {
-        if !output.active {
-            continue;
-        }
 
         let modes = output
             .modes
@@ -26,6 +23,7 @@ pub fn rescan_outputs() -> Result<Vec<RuntimeOutput>> {
             make: non_empty(output.make),
             model: non_empty(output.model),
             serial: non_empty(output.serial),
+            active: output.active,
             current_scale: output.scale.unwrap_or(1.0),
             available_modes: modes,
             layout_x: output.rect.x,
@@ -42,7 +40,7 @@ pub fn default_screen_from_runtime(output: &RuntimeOutput, index: usize) -> Opti
     Some(ScreenConfig {
         id: output.display_id(),
         connector_name: output.connector_name.clone(),
-        enabled: true,
+        enabled: output.active,
         selected_mode: mode.clone(),
         available_modes: output.available_modes.clone(),
         scale: 1.0,

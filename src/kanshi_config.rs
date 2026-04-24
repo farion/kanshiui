@@ -135,12 +135,29 @@ pub fn generate_profile(profile: &Profile) -> String {
         by_id.insert(s.id.as_str(), s);
     }
 
+    // Decide whether to emit the canonical id or the connector name for
+    // each output. When multiple screens share the same canonical id (eg.
+    // identical monitors without serials) we must emit the connector name
+    // to keep outputs unique. Also prefer emitting the connector when it
+    // differs from the canonical id so the kanshi config unambiguously
+    // references the connector. When we choose to emit the connector we
+    // persist a kanshiui comment so the UI can recover the original
+    // friendly id on reload.
+    let counts = screen_multiset(&profile.screens);
     for screen in &profile.screens {
-        let id = format_output_id(&screen.id);
         let state = if screen.enabled { "enable" } else { "disable" };
 
+        let emit_id_raw = if counts.get(&screen.id).cloned().unwrap_or(0) > 1
+            || screen.connector_name != screen.id
+        {
+            screen.connector_name.clone()
+        } else {
+            screen.id.clone()
+        };
+        let id = format_output_id(&emit_id_raw);
+
         // If this screen is mirroring another and a valid target is set,
-        // compute a scale and position so the mirrored content fits centered
+        // compute scale/position so the mirrored content fits centered
         // inside the target's visible area while preserving aspect ratio.
         if screen.mirror {
             if let Some(ref target_id) = screen.mirror_target {
@@ -152,11 +169,7 @@ pub fn generate_profile(profile: &Profile) -> String {
                     let s_h = screen.selected_mode.height as f64;
 
                     // Target virtual sizes = physical / target.scale
-                    let t_scale = if target.scale == 0.0 {
-                        1.0
-                    } else {
-                        target.scale
-                    };
+                    let t_scale = if target.scale == 0.0 { 1.0 } else { target.scale };
                     let t_vw = t_w / t_scale;
                     let t_vh = t_h / t_scale;
 
@@ -182,10 +195,13 @@ pub fn generate_profile(profile: &Profile) -> String {
                     // Emit a kanshiui comment so the editor can recover mirror
                     // metadata later. This is ignored by kanshi but parsed by
                     // the UI when loading profiles.
+                    // Use the original friendly id and the matching target id
+                    // (these are the ScreenConfig.id values stored in the
+                    // profile) so the UI can reconstruct mirror links.
                     out.push_str(&format!(
                         "  # kanshiui: mirror id='{}' target='{}'\n",
-                        screen.id.replace('"', "'"),
-                        target_id.replace('"', "'"),
+                        screen.id.replace('\'' , "\\'"),
+                        target_id.replace('\'' , "\\'"),
                     ));
                     out.push_str(&format!(
                         "  output {id} {state} mode {} position {},{} scale {}\n",
@@ -197,6 +213,17 @@ pub fn generate_profile(profile: &Profile) -> String {
                     continue;
                 }
             }
+        }
+
+        // When we emitted the connector name (instead of the friendly id)
+        // persist that mapping in a kanshiui comment so the UI can restore
+        // the original friendly id on subsequent loads.
+        if emit_id_raw != screen.id {
+            out.push_str(&format!(
+                "  # kanshiui: screen id='{}' connector='{}'\n",
+                screen.id.replace('\'' , "\\'"),
+                screen.connector_name.replace('\'' , "\\'"),
+            ));
         }
 
         // Fallback: write the stored position/scale
@@ -232,17 +259,31 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
     let mut screens = Vec::new();
 
     // Parse kanshiui-specific comments that persist UI-only metadata such as
-    // mirror settings. Comment format:
+    // mirror settings and screen->connector mappings. Comment formats:
     //   # kanshiui: mirror id='SCREEN_ID' target='TARGET_ID'
-    let mirror_re =
-        Regex::new(r#"^\s*#\s*kanshiui:\s*mirror\s+id='([^']+)'\s+target='([^']+)'\s*$"#)?;
+    //   # kanshiui: screen id='SCREEN_ID' connector='CONNECTOR'
+    let mirror_re = Regex::new(r#"^\s*#\s*kanshiui:\s*mirror\s+id='([^']+)'\s+target='([^']+)'\s*$"#)?;
+    let screen_re = Regex::new(r#"^\s*#\s*kanshiui:\s*screen\s+id='([^']+)'\s+connector='([^']+)'\s*$"#)?;
     let mut mirror_map: HashMap<String, String> = HashMap::new();
+    // maps friendly id -> connector (persisted when connector emitted)
+    let mut screen_to_connector: HashMap<String, String> = HashMap::new();
+    // reverse map: connector -> friendly id
+    let mut connector_to_screen: HashMap<String, String> = HashMap::new();
     for line in body.lines() {
         if let Some(caps) = mirror_re.captures(line) {
             let id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
             let target = caps.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
             if !id.is_empty() && !target.is_empty() {
                 mirror_map.insert(id, target);
+            }
+            continue;
+        }
+        if let Some(caps) = screen_re.captures(line) {
+            let id = caps.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+            let conn = caps.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+            if !id.is_empty() && !conn.is_empty() {
+                screen_to_connector.insert(id.clone(), conn.clone());
+                connector_to_screen.insert(conn, id);
             }
         }
     }
@@ -257,6 +298,20 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
         }
         if let Some(caps) = inline_re.captures(line) {
             if let Some(mut screen) = caps_to_screen(&caps, aliases) {
+                // If we have a stored mapping from connector->friendly id, use
+                // it to recover the friendly id when the inline output line
+                // referenced the connector. Conversely, if a screen->connector
+                // mapping exists (we previously emitted connector), use it to
+                // set the connector_name.
+                if let Some(friendly) = connector_to_screen.get(&screen.id) {
+                    // inline line used connector; restore friendly id
+                    screen.connector_name = screen.id.clone();
+                    screen.id = friendly.clone();
+                } else if let Some(conn) = screen_to_connector.get(&screen.id) {
+                    // inline line used friendly id but we have a saved connector
+                    screen.connector_name = conn.clone();
+                }
+
                 // Apply kanshiui mirror metadata when present for inline
                 // output lines as well.
                 if let Some(t) = mirror_map.get(&screen.id) {
@@ -324,9 +379,23 @@ fn parse_profile_body(body: &str, aliases: &HashMap<String, String>) -> Result<V
                 mirror = true;
                 mirror_target = Some(t.clone());
             }
+
+            // If we have a stored mapping, convert output_id (which may be a
+            // connector or a friendly id) into the proper pair of id and
+            // connector_name.
+            let (id_val, conn_val) = if let Some(friendly) = connector_to_screen.get(&output_id) {
+                // output_id was a connector
+                (friendly.clone(), output_id.clone())
+            } else if let Some(conn) = screen_to_connector.get(&output_id) {
+                // output_id was a friendly id
+                (output_id.clone(), conn.clone())
+            } else {
+                (output_id.clone(), output_id.clone())
+            };
+
             screens.push(ScreenConfig {
-                id: output_id.clone(),
-                connector_name: output_id,
+                id: id_val,
+                connector_name: conn_val,
                 enabled,
                 selected_mode: mode.clone(),
                 available_modes: vec![mode],
