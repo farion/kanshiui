@@ -162,11 +162,7 @@ jobs:
             name=$(basename "$f")
 
             # Skip if release already contains an asset with the same name
-            if printf '%s
-' '| sed -n '1,${p;}' >/dev/null 2>&1; then
-              :
-            fi
-            if printf '%s
+            if printf '%s\n' "$existing_assets" | cut -f1 | grep -Fxq "$name"; then
               echo "Skipping $name (already exists in release)"
               continue
             fi
